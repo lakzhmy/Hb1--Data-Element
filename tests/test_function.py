@@ -1,6 +1,5 @@
 """Run integration tests with a speckle server."""
 
-from pydantic import SecretStr
 from speckle_automate import (
     AutomationContext,
     AutomationRunData,
@@ -23,8 +22,10 @@ def test_function_run(
         automation_context,
         automate_function,
         FunctionInputs(
-            forbidden_speckle_type="None",
-            whisper_message=SecretStr("testing automatically"),
+            target_project_id="f91adc2f08",
+            target_model_id="30626b45f1",
+            bucket_size=100.0,
+            property_name="2D area",
         ),
     )
 

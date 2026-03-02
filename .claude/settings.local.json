@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show specklepy)",
+      "Bash(python -m pip show specklepy)",
+      "Bash(python -c \"import specklepy; print\\(specklepy.__file__\\)\")",
+      "Bash(pip show speckle-automate)",
+      "Bash(python -m pip show speckle-automate)",
+      "Bash(pip show speckle_automate)",
+      "Bash(python -c \"import speckle_automate; print\\(speckle_automate.__file__\\)\")",
+      "Bash(python3 -c \"import specklepy; print\\(specklepy.__version__\\)\")"
+    ]
+  }
+}

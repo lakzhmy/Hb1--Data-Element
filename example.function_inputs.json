@@ -1,12 +1,14 @@
 {
-  "speckleToken": "YOUR SPEKCLE TOKEN",
+  "speckleToken": "YOUR SPECKLE TOKEN",
   "functionInputs": {
-    "whisperMessage": "you are doing something weird",
-    "forbiddenSpeckleType": "wall"
+    "targetProjectId": "f91adc2f08",
+    "targetModelId": "30626b45f1",
+    "bucketSize": 100,
+    "propertyName": "2D area"
   },
   "automationRunData": {
-    "project_id": "project id",
-    "speckle_server_url": "https://latest.speckle.systems",
+    "project_id": "08c875bbe4",
+    "speckle_server_url": "https://app.speckle.systems",
     "automation_id": "automation id",
     "automation_run_id": "automation run id",
     "function_run_id": "function run id",
