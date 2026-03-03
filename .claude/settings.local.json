@@ -8,7 +8,14 @@
       "Bash(python -m pip show speckle-automate)",
       "Bash(pip show speckle_automate)",
       "Bash(python -c \"import speckle_automate; print\\(speckle_automate.__file__\\)\")",
-      "Bash(python3 -c \"import specklepy; print\\(specklepy.__version__\\)\")"
+      "Bash(python3 -c \"import specklepy; print\\(specklepy.__version__\\)\")",
+      "Bash(python3 -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
+      "Bash(python -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
+      "Bash(python3 -c \"import specklepy.objects; import pkgutil; [print\\(importer.get_filename\\(module_name\\)\\) for importer, module_name, is_pkg in pkgutil.iter_modules\\(specklepy.objects.__path__, specklepy.objects.__name__ + ''.''\\)]\")",
+      "Bash(xargs grep -l \"parameters\")",
+      "Bash(find \"C:\\\\Users\\\\Lakzhmy\\\\AppData\\\\Roaming\\\\Python\\\\Python314\\\\site-packages\\\\specklepy\\\\objects\" -name \"*.py\" -exec grep -l \"parameters\\\\|Parameter\" {} ;)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:speckle.guide)"
     ]
   }
 }

@@ -174,9 +174,23 @@ def automate_function(
 
     count = len(elements_with_values)
     if count == 0:
-        automate_context.mark_run_failed(
-            f"No elements found with property '{function_inputs.property_name}'."
+        # Debug: collect property names from the first few objects to help diagnose
+        all_objects = list(flatten_base(version_root_object))
+        sample_props: list[str] = []
+        for obj in all_objects[:5]:
+            props = [
+                k for k in obj.__dict__.keys()
+                if not k.startswith("_") and k not in ("id", "speckle_type", "totalChildrenCount", "applicationId")
+            ]
+            sample_props.append(
+                f"  [{obj.speckle_type}] keys: {props}"
+            )
+        debug_msg = (
+            f"No elements found with property '{function_inputs.property_name}'.\n"
+            f"Total flattened objects: {len(all_objects)}\n"
+            f"Sample object properties (first 5):\n" + "\n".join(sample_props)
         )
+        automate_context.mark_run_failed(debug_msg)
         return
 
     # Bucket the elements
