@@ -42,7 +42,7 @@ class FunctionInputs(AutomateBase):
         default=100.0,
         title="Bucket Size",
         description="Size of each area range bucket in model units.",
-        gt=0,
+        gt=50,
     )
     property_name: str = Field(
         default="2D area",
