@@ -51,38 +51,81 @@ class FunctionInputs(AutomateBase):
     )
 
 
+def _try_float(value) -> float | None:
+    """Try to convert a value to float, returning None on failure."""
+    if value is None:
+        return None
+    # If value is itself a Base object, check for a 'value' attribute inside it
+    if isinstance(value, Base):
+        inner = getattr(value, "value", None)
+        if inner is not None:
+            try:
+                return float(inner)
+            except (ValueError, TypeError):
+                return None
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _search_in_object(obj, property_name: str, max_depth: int = 5) -> float | None:
+    """Recursively search for a property inside a Base object or dict."""
+    if max_depth <= 0:
+        return None
+
+    if isinstance(obj, Base):
+        # Direct attribute check
+        value = getattr(obj, property_name, None)
+        if value is None:
+            value = obj.__dict__.get(property_name)
+        result = _try_float(value)
+        if result is not None:
+            return result
+        # Recurse into child Base attributes (skip private/meta keys)
+        for key in obj.__dict__:
+            if key.startswith("_") or key in ("id", "speckle_type", "totalChildrenCount"):
+                continue
+            child = obj.__dict__[key]
+            if isinstance(child, (Base, dict)):
+                result = _search_in_object(child, property_name, max_depth - 1)
+                if result is not None:
+                    return result
+    elif isinstance(obj, dict):
+        value = obj.get(property_name)
+        result = _try_float(value)
+        if result is not None:
+            return result
+        # Recurse into nested dicts/Base objects
+        for child in obj.values():
+            if isinstance(child, (Base, dict)):
+                result = _search_in_object(child, property_name, max_depth - 1)
+                if result is not None:
+                    return result
+
+    return None
+
+
 def get_property_value(element: Base, property_name: str) -> float | None:
     """Extract a numeric property value from a Speckle Base object."""
-    # Direct attribute access (works for dynamic props like "2D area")
-    value = getattr(element, property_name, None)
-    if value is not None:
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            pass
+    # 1. Direct attribute access
+    result = _try_float(getattr(element, property_name, None))
+    if result is not None:
+        return result
 
-    # Fallback: direct __dict__ lookup for names getattr can't resolve
-    value = element.__dict__.get(property_name)
-    if value is not None:
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            pass
+    # 2. Direct __dict__ lookup
+    result = _try_float(element.__dict__.get(property_name))
+    if result is not None:
+        return result
 
-    # Fallback: check inside 'parameters' sub-object
-    parameters = getattr(element, "parameters", None)
-    if parameters is not None:
-        if isinstance(parameters, Base):
-            value = getattr(parameters, property_name, None)
-            if value is None:
-                value = parameters.__dict__.get(property_name)
-        elif isinstance(parameters, dict):
-            value = parameters.get(property_name)
-        if value is not None:
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                pass
+    # 3. Search inside 'parameters' and 'properties' recursively
+    for container_name in ("parameters", "properties"):
+        container = getattr(element, container_name, None)
+        if container is not None:
+            result = _search_in_object(container, property_name)
+            if result is not None:
+                return result
 
     return None
 
@@ -174,21 +217,51 @@ def automate_function(
 
     count = len(elements_with_values)
     if count == 0:
-        # Debug: collect property names from the first few objects to help diagnose
+        # Debug: collect detailed info to help diagnose
         all_objects = list(flatten_base(version_root_object))
         sample_props: list[str] = []
-        for obj in all_objects[:5]:
+        for obj in all_objects[:10]:
             props = [
                 k for k in obj.__dict__.keys()
                 if not k.startswith("_") and k not in ("id", "speckle_type", "totalChildrenCount", "applicationId")
             ]
-            sample_props.append(
-                f"  [{obj.speckle_type}] keys: {props}"
-            )
+            line = f"  [{obj.speckle_type}] keys: {props}"
+            # Show contents of 'properties' if it exists
+            properties_attr = getattr(obj, "properties", None)
+            if properties_attr is not None:
+                if isinstance(properties_attr, Base):
+                    prop_keys = [
+                        k for k in properties_attr.__dict__.keys()
+                        if not k.startswith("_")
+                    ]
+                    line += f"\n    -> properties keys: {prop_keys}"
+                    # Show one level deeper for first 3 sub-keys
+                    for pk in prop_keys[:3]:
+                        child = properties_attr.__dict__.get(pk)
+                        if isinstance(child, Base):
+                            child_keys = [
+                                k for k in child.__dict__.keys()
+                                if not k.startswith("_")
+                            ]
+                            line += f"\n       -> properties.{pk} keys: {child_keys}"
+                elif isinstance(properties_attr, dict):
+                    line += f"\n    -> properties keys: {list(properties_attr.keys())}"
+            sample_props.append(line)
+
+        # Count speckle_types
+        type_counts: dict[str, int] = {}
+        for obj in all_objects:
+            t = obj.speckle_type or "None"
+            type_counts[t] = type_counts.get(t, 0) + 1
+        type_summary = ", ".join(
+            f"{t}: {c}" for t, c in sorted(type_counts.items(), key=lambda x: -x[1])[:10]
+        )
+
         debug_msg = (
             f"No elements found with property '{function_inputs.property_name}'.\n"
             f"Total flattened objects: {len(all_objects)}\n"
-            f"Sample object properties (first 5):\n" + "\n".join(sample_props)
+            f"Type counts: {type_summary}\n"
+            f"Sample objects (first 10):\n" + "\n".join(sample_props)
         )
         automate_context.mark_run_failed(debug_msg)
         return
