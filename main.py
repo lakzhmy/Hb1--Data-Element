@@ -70,25 +70,52 @@ def _try_float(value) -> float | None:
         return None
 
 
+def _get_base_keys(obj: Base) -> list[str]:
+    """Get all dynamic property keys from a Base object."""
+    # Try get_member_names() first (SpecklePy API)
+    if hasattr(obj, "get_member_names"):
+        try:
+            return list(obj.get_member_names())
+        except Exception:
+            pass
+    # Fall back to __dict__
+    return [k for k in obj.__dict__ if not k.startswith("_")]
+
+
+def _get_base_value(obj: Base, key: str):
+    """Get a value from a Base object, trying multiple access methods."""
+    # Try bracket notation first (SpecklePy's preferred access)
+    try:
+        val = obj[key]
+        if val is not None:
+            return val
+    except (KeyError, TypeError, Exception):
+        pass
+    # Try getattr
+    val = getattr(obj, key, None)
+    if val is not None:
+        return val
+    # Try __dict__
+    return obj.__dict__.get(key)
+
+
 def _search_in_object(obj, property_name: str, max_depth: int = 5) -> float | None:
-    """Recursively search for a property inside a Base object or dict."""
+    """Recursively search for a property inside a Base object, dict, or list."""
     if max_depth <= 0:
         return None
 
     if isinstance(obj, Base):
-        # Direct attribute check
-        value = getattr(obj, property_name, None)
-        if value is None:
-            value = obj.__dict__.get(property_name)
+        # Try all access methods for the target property
+        value = _get_base_value(obj, property_name)
         result = _try_float(value)
         if result is not None:
             return result
-        # Recurse into child Base attributes (skip private/meta keys)
-        for key in obj.__dict__:
-            if key.startswith("_") or key in ("id", "speckle_type", "totalChildrenCount"):
+        # Recurse into child attributes
+        for key in _get_base_keys(obj):
+            if key in ("id", "speckle_type", "totalChildrenCount"):
                 continue
-            child = obj.__dict__[key]
-            if isinstance(child, (Base, dict)):
+            child = _get_base_value(obj, key)
+            if isinstance(child, (Base, dict, list)):
                 result = _search_in_object(child, property_name, max_depth - 1)
                 if result is not None:
                     return result
@@ -97,10 +124,15 @@ def _search_in_object(obj, property_name: str, max_depth: int = 5) -> float | No
         result = _try_float(value)
         if result is not None:
             return result
-        # Recurse into nested dicts/Base objects
         for child in obj.values():
-            if isinstance(child, (Base, dict)):
+            if isinstance(child, (Base, dict, list)):
                 result = _search_in_object(child, property_name, max_depth - 1)
+                if result is not None:
+                    return result
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (Base, dict, list)):
+                result = _search_in_object(item, property_name, max_depth - 1)
                 if result is not None:
                     return result
 
@@ -109,19 +141,15 @@ def _search_in_object(obj, property_name: str, max_depth: int = 5) -> float | No
 
 def get_property_value(element: Base, property_name: str) -> float | None:
     """Extract a numeric property value from a Speckle Base object."""
-    # 1. Direct attribute access
-    result = _try_float(getattr(element, property_name, None))
+    # 1. Try all direct access methods
+    value = _get_base_value(element, property_name)
+    result = _try_float(value)
     if result is not None:
         return result
 
-    # 2. Direct __dict__ lookup
-    result = _try_float(element.__dict__.get(property_name))
-    if result is not None:
-        return result
-
-    # 3. Search inside 'parameters' and 'properties' recursively
+    # 2. Search inside 'parameters' and 'properties' recursively
     for container_name in ("parameters", "properties"):
-        container = getattr(element, container_name, None)
+        container = _get_base_value(element, container_name)
         if container is not None:
             result = _search_in_object(container, property_name)
             if result is not None:
@@ -220,32 +248,41 @@ def automate_function(
         # Debug: collect detailed info to help diagnose
         all_objects = list(flatten_base(version_root_object))
         sample_props: list[str] = []
-        for obj in all_objects[:10]:
-            props = [
-                k for k in obj.__dict__.keys()
-                if not k.startswith("_") and k not in ("id", "speckle_type", "totalChildrenCount", "applicationId")
-            ]
-            line = f"  [{obj.speckle_type}] keys: {props}"
-            # Show contents of 'properties' if it exists
-            properties_attr = getattr(obj, "properties", None)
-            if properties_attr is not None:
-                if isinstance(properties_attr, Base):
-                    prop_keys = [
-                        k for k in properties_attr.__dict__.keys()
-                        if not k.startswith("_")
-                    ]
-                    line += f"\n    -> properties keys: {prop_keys}"
-                    # Show one level deeper for first 3 sub-keys
-                    for pk in prop_keys[:3]:
-                        child = properties_attr.__dict__.get(pk)
-                        if isinstance(child, Base):
-                            child_keys = [
-                                k for k in child.__dict__.keys()
-                                if not k.startswith("_")
-                            ]
-                            line += f"\n       -> properties.{pk} keys: {child_keys}"
-                elif isinstance(properties_attr, dict):
-                    line += f"\n    -> properties keys: {list(properties_attr.keys())}"
+        shown_properties_detail = 0  # limit verbose output
+        for obj in all_objects[:15]:
+            keys = _get_base_keys(obj)
+            line = f"  [{obj.speckle_type}] keys: {keys}"
+            # Show detailed 'properties' content for first 3 objects that have it
+            if shown_properties_detail < 3:
+                properties_attr = _get_base_value(obj, "properties")
+                if properties_attr is not None:
+                    shown_properties_detail += 1
+                    line += f"\n    -> properties type: {type(properties_attr).__name__}"
+                    if isinstance(properties_attr, Base):
+                        pk = _get_base_keys(properties_attr)
+                        line += f"\n    -> properties keys: {pk}"
+                        # Show one level deeper for each sub-key
+                        for k in pk[:5]:
+                            child = _get_base_value(properties_attr, k)
+                            if isinstance(child, Base):
+                                ck = _get_base_keys(child)
+                                line += f"\n       -> .{k} keys: {ck}"
+                            elif isinstance(child, dict):
+                                line += f"\n       -> .{k} dict keys: {list(child.keys())[:10]}"
+                            elif isinstance(child, list):
+                                line += f"\n       -> .{k} list len={len(child)}"
+                                if child and isinstance(child[0], Base):
+                                    line += f" item[0] keys: {_get_base_keys(child[0])}"
+                            else:
+                                line += f"\n       -> .{k} = {repr(child)[:100]}"
+                    elif isinstance(properties_attr, dict):
+                        line += f"\n    -> properties dict keys: {list(properties_attr.keys())[:15]}"
+                    elif isinstance(properties_attr, list):
+                        line += f"\n    -> properties list len={len(properties_attr)}"
+                        if properties_attr and isinstance(properties_attr[0], Base):
+                            line += f" item[0] keys: {_get_base_keys(properties_attr[0])}"
+                    else:
+                        line += f"\n    -> properties repr: {repr(properties_attr)[:200]}"
             sample_props.append(line)
 
         # Count speckle_types
@@ -258,10 +295,10 @@ def automate_function(
         )
 
         debug_msg = (
-            f"No elements found with property '{function_inputs.property_name}'.\n"
+            f"[v3] No elements found with property '{function_inputs.property_name}'.\n"
             f"Total flattened objects: {len(all_objects)}\n"
             f"Type counts: {type_summary}\n"
-            f"Sample objects (first 10):\n" + "\n".join(sample_props)
+            f"Sample objects (first 15):\n" + "\n".join(sample_props)
         )
         automate_context.mark_run_failed(debug_msg)
         return
