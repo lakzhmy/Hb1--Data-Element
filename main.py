@@ -3,6 +3,7 @@
 
 import math
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from pydantic import Field, SecretStr
 from speckle_automate import (
@@ -15,6 +16,7 @@ from specklepy.api.client import SpeckleClient
 from specklepy.core.api.inputs.model_inputs import CreateModelInput
 from specklepy.core.api.inputs.project_inputs import ProjectModelsFilter
 from specklepy.core.api.inputs.version_inputs import CreateVersionInput
+from specklepy.logging.exceptions import GraphQLException
 from specklepy.objects import Base
 from specklepy.transports.server import ServerTransport
 
@@ -171,21 +173,56 @@ def bucket_elements(
 
 
 def get_or_create_model(client, project_id: str, model_name: str):
-    """Find an existing model by name or create a new one."""
+    """Find an existing model by name or create a new one.
+
+    Handles the case where fuzzy search misses the model but it
+    already exists, causing create() to throw a conflict error.
+    """
     models_filter = ProjectModelsFilter(search=model_name)
-    existing = client.model.get_models(project_id, models_filter=models_filter)
+    existing = client.model.get_models(
+        project_id, models_filter=models_filter, models_limit=100
+    )
 
     for model in existing.items:
         if model.name == model_name:
             return model
 
-    return client.model.create(
-        CreateModelInput(
-            name=model_name,
-            description=f"Auto-generated bucket: {model_name}",
-            project_id=project_id,
+    # Not found in search results — try to create
+    try:
+        return client.model.create(
+            CreateModelInput(
+                name=model_name,
+                description=f"Auto-generated bucket: {model_name}",
+                project_id=project_id,
+            )
         )
-    )
+    except (GraphQLException, Exception) as exc:
+        # If creation failed due to conflict ("already exists"),
+        # re-fetch with pagination
+        exc_str = str(exc).lower()
+        if "already exists" not in exc_str:
+            raise
+
+        # Re-search: the model exists but was missed by fuzzy search
+        cursor = None
+        while True:
+            page = client.model.get_models(
+                project_id,
+                models_filter=models_filter,
+                models_limit=100,
+                models_cursor=cursor,
+            )
+            for model in page.items:
+                if model.name == model_name:
+                    return model
+            if not page.cursor or len(page.items) == 0:
+                break
+            cursor = page.cursor
+
+        raise RuntimeError(
+            f"Model '{model_name}' already exists in project "
+            f"'{project_id}' but could not be found via search."
+        ) from exc
 
 
 def publish_to_target_project(
@@ -213,6 +250,122 @@ def publish_to_target_project(
     )
 
 
+def build_source_metadata(automate_context: AutomationContext) -> dict:
+    """Build metadata dict from the automation trigger context."""
+    run_data = automate_context.automation_run_data
+    trigger = run_data.triggers[0].payload
+    return {
+        "source_version_id": trigger.version_id,
+        "source_model_id": trigger.model_id,
+        "run_timestamp": datetime.now(timezone.utc).isoformat(),
+        "automation_run_id": run_data.automation_run_id,
+    }
+
+
+def publish_manifest(
+    client,
+    project_id: str,
+    parent_name: str,
+    source_metadata: dict,
+    bucket_records: list[dict],
+    empty_ranges: list[str],
+    total_elements: int,
+    property_name: str,
+    bucket_size: float,
+) -> None:
+    """Create or update the _manifest model with run metadata."""
+    manifest_model_name = f"{parent_name}/_manifest"
+    model = get_or_create_model(client, project_id, manifest_model_name)
+
+    root = Base()
+    root["source_version_id"] = source_metadata["source_version_id"]
+    root["source_model_id"] = source_metadata["source_model_id"]
+    root["run_timestamp"] = source_metadata["run_timestamp"]
+    root["automation_run_id"] = source_metadata["automation_run_id"]
+    root["buckets"] = bucket_records
+    root["empty_ranges"] = empty_ranges
+    root["total_elements"] = total_elements
+    root["property_name"] = property_name
+    root["bucket_size"] = bucket_size
+
+    publish_to_target_project(
+        client=client,
+        project_id=project_id,
+        model_id=model.id,
+        root_object=root,
+        version_message=(
+            f"Manifest: {total_elements} elements, "
+            f"{len(bucket_records)} buckets, "
+            f"{len(empty_ranges)} empty ranges"
+        ),
+    )
+
+
+def publish_visualization(
+    client,
+    project_id: str,
+    parent_name: str,
+    elements_with_values: list[tuple[Base, float]],
+    bucket_size: float,
+    source_metadata: dict,
+) -> None:
+    """Publish a combined visualization model with gradient-normalized values."""
+    if not elements_with_values:
+        return
+
+    viz_model_name = f"{parent_name}/_visualization"
+    model = get_or_create_model(client, project_id, viz_model_name)
+
+    # Compute global min/max for normalization
+    values = [v for _, v in elements_with_values]
+    global_min = min(values)
+    global_max = max(values)
+    value_range = global_max - global_min
+
+    # Build annotated elements
+    annotated_elements = []
+    for element, value in elements_with_values:
+        # Compute normalized gradient (0.0 to 1.0)
+        if value_range > 0:
+            gradient_value = (value - global_min) / value_range
+        else:
+            gradient_value = 0.5  # All values identical
+
+        # Compute bucket label for this element
+        bucket_index = int(math.floor(value / bucket_size))
+        range_low = bucket_index * bucket_size
+        range_high = range_low + bucket_size
+        bucket_label = f"{range_low:.0f}-{range_high:.0f}"
+
+        # Create a wrapper Base with the annotations
+        wrapper = Base()
+        wrapper["@element"] = element
+        wrapper["gradient_value"] = gradient_value
+        wrapper["property_value"] = value
+        wrapper["bucket_label"] = bucket_label
+        annotated_elements.append(wrapper)
+
+    root = Base()
+    root["@elements"] = annotated_elements
+    root["total_elements"] = len(annotated_elements)
+    root["global_min"] = global_min
+    root["global_max"] = global_max
+    root["source_version_id"] = source_metadata["source_version_id"]
+    root["source_model_id"] = source_metadata["source_model_id"]
+    root["run_timestamp"] = source_metadata["run_timestamp"]
+
+    publish_to_target_project(
+        client=client,
+        project_id=project_id,
+        model_id=model.id,
+        root_object=root,
+        version_message=(
+            f"Visualization: {len(annotated_elements)} elements, "
+            f"range [{global_min:.1f}, {global_max:.1f}]"
+        ),
+    )
+
+
 def automate_function(
     automate_context: AutomationContext,
     function_inputs: FunctionInputs,
@@ -232,6 +385,9 @@ def automate_function(
         function_inputs.target_model_id, target_project_id
     )
     parent_name = parent_model.name
+
+    # Build source metadata for embedding in versions (B1)
+    source_metadata = build_source_metadata(automate_context)
 
     # Flatten and extract elements with the target property
     elements_with_values: list[tuple[Base, float]] = []
@@ -307,8 +463,22 @@ def automate_function(
     buckets = bucket_elements(elements_with_values, function_inputs.bucket_size)
     bucket_size = function_inputs.bucket_size
 
-    # Publish each bucket as a sub-model under the parent
+    # Compute empty ranges between min and max populated bucket (A1)
+    populated_indices = sorted(buckets.keys())
+    min_index = populated_indices[0]
+    max_index = populated_indices[-1]
+    all_indices_in_range = set(range(min_index, max_index + 1))
+    empty_indices = all_indices_in_range - set(populated_indices)
+    empty_ranges = []
+    for idx in sorted(empty_indices):
+        range_low = idx * bucket_size
+        range_high = range_low + bucket_size
+        empty_ranges.append(f"{range_low:.0f}-{range_high:.0f}")
+
+    # Publish each populated bucket as a sub-model under the parent
     created = 0
+    bucket_records: list[dict] = []  # For the manifest (B2)
+
     for bucket_index in sorted(buckets.keys()):
         elements = buckets[bucket_index]
         range_low = bucket_index * bucket_size
@@ -319,14 +489,18 @@ def automate_function(
         # Get or create sub-model
         model = get_or_create_model(target_client, target_project_id, model_name)
 
-        # Build root object for this bucket
+        # Build root object for this bucket, including source metadata (B1)
         root = Base()
         root["@elements"] = elements
         root["bucket_label"] = bucket_label
         root["element_count"] = len(elements)
+        root["source_version_id"] = source_metadata["source_version_id"]
+        root["source_model_id"] = source_metadata["source_model_id"]
+        root["run_timestamp"] = source_metadata["run_timestamp"]
+        root["automation_run_id"] = source_metadata["automation_run_id"]
 
         # Publish
-        publish_to_target_project(
+        version = publish_to_target_project(
             client=target_client,
             project_id=target_project_id,
             model_id=model.id,
@@ -336,6 +510,16 @@ def automate_function(
                 f"({function_inputs.property_name})"
             ),
         )
+
+        # Collect record for manifest (B2)
+        bucket_records.append({
+            "bucket_label": bucket_label,
+            "model_id": model.id,
+            "version_id": version.id,
+            "element_count": len(elements),
+            "range_low": range_low,
+            "range_high": range_high,
+        })
 
         # Annotate source objects
         automate_context.attach_info_to_objects(
@@ -348,8 +532,32 @@ def automate_function(
         )
         created += 1
 
+    # Publish manifest model (B2)
+    publish_manifest(
+        client=target_client,
+        project_id=target_project_id,
+        parent_name=parent_name,
+        source_metadata=source_metadata,
+        bucket_records=bucket_records,
+        empty_ranges=empty_ranges,
+        total_elements=count,
+        property_name=function_inputs.property_name,
+        bucket_size=bucket_size,
+    )
+
+    # Publish visualization model (C2+C3)
+    publish_visualization(
+        client=target_client,
+        project_id=target_project_id,
+        parent_name=parent_name,
+        elements_with_values=elements_with_values,
+        bucket_size=bucket_size,
+        source_metadata=source_metadata,
+    )
+
     automate_context.mark_run_success(
         f"Published {count} elements across {created} buckets "
+        f"(plus manifest and visualization) "
         f"to project {target_project_id}."
     )
 
