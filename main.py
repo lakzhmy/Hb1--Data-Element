@@ -178,16 +178,7 @@ def get_or_create_model(client, project_id: str, model_name: str):
     Handles the case where fuzzy search misses the model but it
     already exists, causing create() to throw a conflict error.
     """
-    models_filter = ProjectModelsFilter(search=model_name)
-    existing = client.model.get_models(
-        project_id, models_filter=models_filter, models_limit=100
-    )
-
-    for model in existing.items:
-        if model.name == model_name:
-            return model
-
-    # Not found in search results — try to create
+    # Try to create first (fast path for first run)
     try:
         return client.model.create(
             CreateModelInput(
@@ -197,31 +188,50 @@ def get_or_create_model(client, project_id: str, model_name: str):
             )
         )
     except (GraphQLException, Exception) as exc:
-        # If creation failed due to conflict ("already exists"),
-        # re-fetch WITHOUT the search filter (fuzzy search is unreliable)
         exc_str = str(exc).lower()
         if "already exists" not in exc_str:
             raise
 
-        # Paginate through ALL models with no filter to find exact match
-        cursor = None
-        while True:
-            page = client.model.get_models(
-                project_id,
-                models_limit=100,
-                models_cursor=cursor,
-            )
-            for model in page.items:
-                if model.name == model_name:
-                    return model
-            if not page.cursor or len(page.items) == 0:
-                break
-            cursor = page.cursor
+    # Model exists — find it. Try multiple matching strategies.
+    all_names: list[str] = []
+    cursor = None
+    while True:
+        page = client.model.get_models(
+            project_id,
+            models_limit=100,
+            models_cursor=cursor,
+        )
+        for model in page.items:
+            all_names.append(model.name)
+            if model.name == model_name:
+                return model
+        if not page.cursor or len(page.items) == 0:
+            break
+        cursor = page.cursor
 
-        raise RuntimeError(
-            f"Model '{model_name}' already exists in project "
-            f"'{project_id}' but could not be found via search."
-        ) from exc
+    # Exact match failed — try case-insensitive and stripped comparison
+    for _name in all_names:
+        if _name.strip().lower() == model_name.strip().lower():
+            # Re-fetch to get the model object
+            cursor = None
+            while True:
+                page = client.model.get_models(
+                    project_id,
+                    models_limit=100,
+                    models_cursor=cursor,
+                )
+                for model in page.items:
+                    if model.name == _name:
+                        return model
+                if not page.cursor or len(page.items) == 0:
+                    break
+                cursor = page.cursor
+
+    raise RuntimeError(
+        f"Model '{model_name}' already exists in project "
+        f"'{project_id}' but could not be found via search. "
+        f"All model names in project ({len(all_names)}): {all_names}"
+    )
 
 
 def publish_to_target_project(
