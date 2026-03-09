@@ -47,7 +47,7 @@ class FunctionInputs(AutomateBase):
         gt=50,
     )
     property_name: str = Field(
-        default="2D area",
+        default="PRG_PAR_MeanDistToExit",
         title="Property Name",
         description="Name of the numeric property to bucket by.",
     )
