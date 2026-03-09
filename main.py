@@ -198,17 +198,16 @@ def get_or_create_model(client, project_id: str, model_name: str):
         )
     except (GraphQLException, Exception) as exc:
         # If creation failed due to conflict ("already exists"),
-        # re-fetch with pagination
+        # re-fetch WITHOUT the search filter (fuzzy search is unreliable)
         exc_str = str(exc).lower()
         if "already exists" not in exc_str:
             raise
 
-        # Re-search: the model exists but was missed by fuzzy search
+        # Paginate through ALL models with no filter to find exact match
         cursor = None
         while True:
             page = client.model.get_models(
                 project_id,
-                models_filter=models_filter,
                 models_limit=100,
                 models_cursor=cursor,
             )
