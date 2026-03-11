@@ -5,14 +5,13 @@ import math
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from pydantic import Field, SecretStr
+from pydantic import Field
 from speckle_automate import (
     AutomateBase,
     AutomationContext,
     execute_automate_function,
 )
 from specklepy.api import operations
-from specklepy.api.client import SpeckleClient
 from specklepy.core.api.inputs.model_inputs import CreateModelInput
 from specklepy.core.api.inputs.project_inputs import ProjectModelsFilter
 from specklepy.core.api.inputs.version_inputs import CreateVersionInput
@@ -26,11 +25,6 @@ from flatten import flatten_base
 class FunctionInputs(AutomateBase):
     """User-configurable inputs for the area bucketing function."""
 
-    speckle_token: SecretStr = Field(
-        title="Speckle Token",
-        description="Personal access token with write access to the target project. "
-        "The automation token is scoped to the source project only.",
-    )
     target_project_id: str = Field(
         title="Target Project ID",
         description="The Speckle project ID where bucketed models will be published.",
@@ -44,7 +38,7 @@ class FunctionInputs(AutomateBase):
         default=100.0,
         title="Bucket Size",
         description="Size of each area range bucket in model units.",
-        gt=50,
+        gt=0,
     )
     property_name: str = Field(
         default="PRG_PAR_MeanDistToExit",
@@ -382,12 +376,8 @@ def automate_function(
     """Bucket elements by a numeric property and publish to a target project."""
     version_root_object = automate_context.receive_version()
 
-    # Create a separate client for the target project using the personal token
-    server_url = automate_context.automation_run_data.speckle_server_url
-    target_client = SpeckleClient(host=server_url)
-    target_client.authenticate_with_token(
-        function_inputs.speckle_token.get_secret_value()
-    )
+    # Use the pre-authenticated client from the automation context
+    target_client = automate_context.speckle_client
 
     target_project_id = function_inputs.target_project_id
     parent_model = target_client.model.get(
