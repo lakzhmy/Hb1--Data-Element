@@ -6,7 +6,6 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
 
 from pydantic import Field, SecretStr
 from speckle_automate import (
@@ -60,13 +59,13 @@ class FunctionInputs(AutomateBase):
             "Manual: you choose the number of buckets."
         ),
     )
-    num_buckets: Optional[int] = Field(
-        default=None,
+    num_buckets: int = Field(
+        default=10,
         title="Number of Buckets (Manual only)",
         description=(
             "Only used when Bucket Method is 'manual'. "
             "How many buckets to split the data into. "
-            "Ignored for other methods."
+            "Ignored for Scott, Square Root, and Sturges methods."
         ),
         gt=0,
     )
@@ -187,7 +186,7 @@ def get_property_value(element: Base, property_name: str) -> float | None:
 def compute_bucket_size(
     values: list[float],
     method: BucketMethod,
-    num_buckets: Optional[int] = None,
+    num_buckets: int = 10,
 ) -> tuple[float, int, str]:
     """Compute bucket size from data using the selected method.
 
@@ -230,16 +229,9 @@ def compute_bucket_size(
         )
 
     elif method == BucketMethod.MANUAL:
-        if num_buckets is None or num_buckets < 1:
-            k = max(1, int(math.ceil(math.sqrt(n))))
-            desc = (
-                f"Manual (no count provided, falling back to Square Root): "
-                f"n={n}, k={k}"
-            )
-        else:
-            k = num_buckets
-            desc = f"Manual: user requested k={k}"
+        k = max(1, num_buckets)
         bucket_size = val_range / k
+        desc = f"Manual: user requested k={k}"
 
     else:
         raise ValueError(f"Unknown bucket method: {method}")
@@ -655,6 +647,33 @@ def automate_function(
             ),
         )
         created += 1
+
+    # Apply per-bucket gradient coloring on the source model (experimental API)
+    # All elements in the same bucket get the same gradient value → discrete color bands
+    min_bucket_idx = min(buckets.keys())
+    max_bucket_idx = max(buckets.keys())
+    bucket_span = max_bucket_idx - min_bucket_idx
+
+    gradient_objects = []
+    gradient_values = []
+    for element, value in elements_with_values:
+        bucket_index = int(math.floor(value / bucket_size))
+        if bucket_span > 0:
+            grad = (bucket_index - min_bucket_idx) / bucket_span
+        else:
+            grad = 0.5
+        gradient_objects.append(element)
+        gradient_values.append(grad)
+
+    automate_context.attach_info_to_objects(
+        category="Bucket Gradient",
+        metadata={"gradient": True, "gradientValues": gradient_values},
+        message=(
+            f"{function_inputs.property_name}: {created} buckets, "
+            f"size={bucket_size:.2f} ({function_inputs.bucket_method.value})"
+        ),
+        affected_objects=gradient_objects,
+    )
 
     # Publish manifest model (B2)
     publish_manifest(
