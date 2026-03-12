@@ -652,6 +652,7 @@ def automate_function(
 
         # Collect record for manifest
         bucket_records.append({
+            "bucket_index": bucket_index,
             "bucket_label": bucket_label,
             "model_id": model.id,
             "version_id": version.id,
