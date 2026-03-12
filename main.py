@@ -594,11 +594,13 @@ def automate_function(
     # Bucket the elements
     buckets = bucket_elements(elements_with_values, bucket_size)
 
-    # Compute empty ranges between min and max populated bucket (A1)
+    # Compute bucket index range and empty ranges
     populated_indices = sorted(buckets.keys())
-    min_index = populated_indices[0]
-    max_index = populated_indices[-1]
-    all_indices_in_range = set(range(min_index, max_index + 1))
+    min_bucket_idx = populated_indices[0]
+    max_bucket_idx = populated_indices[-1]
+    bucket_span = max_bucket_idx - min_bucket_idx
+
+    all_indices_in_range = set(range(min_bucket_idx, max_bucket_idx + 1))
     empty_indices = all_indices_in_range - set(populated_indices)
     empty_ranges = []
     for idx in sorted(empty_indices):
@@ -608,7 +610,7 @@ def automate_function(
 
     # Publish each populated bucket as a sub-model under the parent
     created = 0
-    bucket_records: list[dict] = []  # For the manifest (B2)
+    bucket_records: list[dict] = []  # For the manifest
 
     for bucket_index in sorted(buckets.keys()):
         elements = buckets[bucket_index]
@@ -620,7 +622,7 @@ def automate_function(
         # Get or create sub-model
         model = get_or_create_model(target_client, target_project_id, model_name)
 
-        # Build root object for this bucket, including source metadata (B1)
+        # Build root object for this bucket, including source metadata
         root = Base()
         root["@elements"] = elements
         root["bucket_label"] = bucket_label
@@ -642,7 +644,13 @@ def automate_function(
             ),
         )
 
-        # Collect record for manifest (B2)
+        # Normalized color position for this bucket (0-1)
+        if bucket_span > 0:
+            color_position = (bucket_index - min_bucket_idx) / bucket_span
+        else:
+            color_position = 0.5
+
+        # Collect record for manifest
         bucket_records.append({
             "bucket_label": bucket_label,
             "model_id": model.id,
@@ -650,44 +658,18 @@ def automate_function(
             "element_count": len(elements),
             "range_low": range_low,
             "range_high": range_high,
+            "color_position": color_position,
         })
-
-        # Annotate source objects
-        automate_context.attach_info_to_objects(
-            category=f"Bucket: {bucket_label}",
-            affected_objects=elements,
-            message=(
-                f"{len(elements)} elements with "
-                f"{function_inputs.property_name} in [{range_low:.0f}, {range_high:.0f})"
-            ),
-        )
         created += 1
 
-    # Apply per-bucket gradient coloring on the source model (experimental API)
-    # All elements in the same bucket get the same gradient value → discrete color bands
-    min_bucket_idx = min(buckets.keys())
-    max_bucket_idx = max(buckets.keys())
-    bucket_span = max_bucket_idx - min_bucket_idx
-
-    gradient_objects = []
-    gradient_values = {}
-    for element, value in elements_with_values:
-        bucket_index = int(math.floor(value / bucket_size))
-        if bucket_span > 0:
-            grad = (bucket_index - min_bucket_idx) / bucket_span
-        else:
-            grad = 0.5
-        gradient_objects.append(element)
-        gradient_values[element.id] = grad
-
+    # Single summary annotation (avoids verbose per-bucket logging)
     automate_context.attach_info_to_objects(
-        category="Bucket Gradient",
-        metadata={"gradient": True, "gradientValues": gradient_values},
+        category="Bucket Summary",
+        affected_objects=[e for e, _ in elements_with_values],
         message=(
-            f"{function_inputs.property_name}: {created} buckets, "
-            f"size={bucket_size:.2f} ({function_inputs.bucket_method.short})"
+            f"{count} elements across {created} buckets "
+            f"({function_inputs.property_name}, size={bucket_size:.2f})"
         ),
-        affected_objects=gradient_objects,
     )
 
     # Publish manifest model (B2)
