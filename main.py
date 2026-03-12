@@ -26,10 +26,15 @@ from flatten import flatten_base
 
 
 class BucketMethod(str, Enum):
-    SCOTT = "scott"
-    SQUARE_ROOT = "square_root"
-    STURGES = "sturges"
-    MANUAL = "manual"
+    SCOTT = "scott — adapts to data spread (recommended)"
+    SQUARE_ROOT = "square_root — simple, best for 200+ elements"
+    STURGES = "sturges — conservative, best for <200 elements"
+    MANUAL = "manual — you set the number of buckets"
+
+    @property
+    def short(self) -> str:
+        """Short label for logs and metadata (e.g. 'scott', 'square_root')."""
+        return self.value.split(" — ")[0]
 
 
 class FunctionInputs(AutomateBase):
@@ -209,7 +214,7 @@ def compute_bucket_size(
 
     if val_range == 0:
         # All values identical — one bucket
-        return 1.0, 1, f"{method.value} (all values identical, 1 bucket)"
+        return 1.0, 1, f"{method.short} (all values identical, 1 bucket)"
 
     if method == BucketMethod.SQUARE_ROOT:
         k = max(1, int(math.ceil(math.sqrt(n))))
@@ -680,7 +685,7 @@ def automate_function(
         metadata={"gradient": True, "gradientValues": gradient_values},
         message=(
             f"{function_inputs.property_name}: {created} buckets, "
-            f"size={bucket_size:.2f} ({function_inputs.bucket_method.value})"
+            f"size={bucket_size:.2f} ({function_inputs.bucket_method.short})"
         ),
         affected_objects=gradient_objects,
     )
@@ -696,7 +701,7 @@ def automate_function(
         total_elements=count,
         property_name=function_inputs.property_name,
         bucket_size=bucket_size,
-        bucket_method=function_inputs.bucket_method.value,
+        bucket_method=function_inputs.bucket_method.short,
         method_description=method_desc,
         data_min=min(all_values),
         data_max=max(all_values),
@@ -710,12 +715,12 @@ def automate_function(
         elements_with_values=elements_with_values,
         bucket_size=bucket_size,
         source_metadata=source_metadata,
-        bucket_method=function_inputs.bucket_method.value,
+        bucket_method=function_inputs.bucket_method.short,
     )
 
     automate_context.mark_run_success(
         f"Published {count} elements across {created} buckets "
-        f"(bucket size={bucket_size:.2f}, method={function_inputs.bucket_method.value}). "
+        f"(bucket size={bucket_size:.2f}, method={function_inputs.bucket_method.short}). "
         f"{method_desc}. "
         f"Data range: [{min(all_values):.1f}, {max(all_values):.1f}]. "
         f"Includes manifest and visualization with discrete color bands."
