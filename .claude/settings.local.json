@@ -16,7 +16,8 @@
       "Bash(find \"C:\\\\Users\\\\Lakzhmy\\\\AppData\\\\Roaming\\\\Python\\\\Python314\\\\site-packages\\\\specklepy\\\\objects\" -name \"*.py\" -exec grep -l \"parameters\\\\|Parameter\" {} ;)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:speckle.guide)",
-      "Bash(git -C /c/IaaC/BIMSC/BIMSC_CW_LZ/Hb1-Data-Element remote -v)"
+      "Bash(git -C /c/IaaC/BIMSC/BIMSC_CW_LZ/Hb1-Data-Element remote -v)",
+      "Bash(xargs grep -l \"metadata\")"
     ]
   }
 }

@@ -670,7 +670,7 @@ def automate_function(
     bucket_span = max_bucket_idx - min_bucket_idx
 
     gradient_objects = []
-    gradient_values = []
+    gradient_values = {}
     for element, value in elements_with_values:
         bucket_index = int(math.floor(value / bucket_size))
         if bucket_span > 0:
@@ -678,7 +678,7 @@ def automate_function(
         else:
             grad = 0.5
         gradient_objects.append(element)
-        gradient_values.append(grad)
+        gradient_values[element.id] = grad
 
     automate_context.attach_info_to_objects(
         category="Bucket Gradient",
