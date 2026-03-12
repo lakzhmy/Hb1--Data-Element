@@ -2,8 +2,11 @@
 #yey
 
 import math
+import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
+from enum import Enum
+from typing import Optional
 
 from pydantic import Field, SecretStr
 from speckle_automate import (
@@ -23,6 +26,13 @@ from specklepy.transports.server import ServerTransport
 from flatten import flatten_base
 
 
+class BucketMethod(str, Enum):
+    SCOTT = "scott"
+    SQUARE_ROOT = "square_root"
+    STURGES = "sturges"
+    MANUAL = "manual"
+
+
 class FunctionInputs(AutomateBase):
     """User-configurable inputs for the area bucketing function."""
 
@@ -39,10 +49,25 @@ class FunctionInputs(AutomateBase):
         description="Parent model ID in the target project. "
         "Sub-models for each bucket will be created under this model.",
     )
-    bucket_size: float = Field(
-        default=100.0,
-        title="Bucket Size",
-        description="Size of each area range bucket in model units.",
+    bucket_method: BucketMethod = Field(
+        default=BucketMethod.SCOTT,
+        title="Bucket Method",
+        description=(
+            "How to determine the number of buckets. "
+            "Scott (recommended): adapts to data spread, best for mixed-scale properties. "
+            "Square Root: simple default, n = sqrt(count). "
+            "Sturges: conservative, fewer buckets, good for <200 elements. "
+            "Manual: you choose the number of buckets."
+        ),
+    )
+    num_buckets: Optional[int] = Field(
+        default=None,
+        title="Number of Buckets (Manual only)",
+        description=(
+            "Only used when Bucket Method is 'manual'. "
+            "How many buckets to split the data into. "
+            "Ignored for other methods."
+        ),
         gt=0,
     )
     property_name: str = Field(
@@ -157,6 +182,69 @@ def get_property_value(element: Base, property_name: str) -> float | None:
                 return result
 
     return None
+
+
+def compute_bucket_size(
+    values: list[float],
+    method: BucketMethod,
+    num_buckets: Optional[int] = None,
+) -> tuple[float, int, str]:
+    """Compute bucket size from data using the selected method.
+
+    Returns (bucket_size, expected_bucket_count, method_description).
+    """
+    n = len(values)
+    val_min = min(values)
+    val_max = max(values)
+    val_range = val_max - val_min
+
+    if val_range == 0:
+        # All values identical — one bucket
+        return 1.0, 1, f"{method.value} (all values identical, 1 bucket)"
+
+    if method == BucketMethod.SQUARE_ROOT:
+        k = max(1, int(math.ceil(math.sqrt(n))))
+        bucket_size = val_range / k
+        desc = f"Square Root: n={n}, sqrt={math.sqrt(n):.1f}, k={k}"
+
+    elif method == BucketMethod.STURGES:
+        k = max(1, int(math.ceil(1 + 3.322 * math.log10(n))))
+        bucket_size = val_range / k
+        desc = f"Sturges: n={n}, k=1+3.322*log10({n})={k}"
+
+    elif method == BucketMethod.SCOTT:
+        if n < 2:
+            bucket_size = val_range
+            k = 1
+        else:
+            std_dev = statistics.stdev(values)
+            if std_dev == 0:
+                return 1.0, 1, "Scott (zero std dev, 1 bucket)"
+            bucket_size = 3.49 * std_dev / (n ** (1.0 / 3.0))
+            k = max(1, int(math.ceil(val_range / bucket_size)))
+            # Recompute bucket_size from k so buckets tile evenly
+            bucket_size = val_range / k
+        desc = (
+            f"Scott: n={n}, stdev={statistics.stdev(values) if n >= 2 else 0:.2f}, "
+            f"k={k}"
+        )
+
+    elif method == BucketMethod.MANUAL:
+        if num_buckets is None or num_buckets < 1:
+            k = max(1, int(math.ceil(math.sqrt(n))))
+            desc = (
+                f"Manual (no count provided, falling back to Square Root): "
+                f"n={n}, k={k}"
+            )
+        else:
+            k = num_buckets
+            desc = f"Manual: user requested k={k}"
+        bucket_size = val_range / k
+
+    else:
+        raise ValueError(f"Unknown bucket method: {method}")
+
+    return bucket_size, k, desc
 
 
 def bucket_elements(
@@ -280,6 +368,10 @@ def publish_manifest(
     total_elements: int,
     property_name: str,
     bucket_size: float,
+    bucket_method: str,
+    method_description: str,
+    data_min: float,
+    data_max: float,
 ) -> None:
     """Create or update the _manifest model with run metadata."""
     manifest_model_name = f"{parent_name}/_manifest"
@@ -295,6 +387,11 @@ def publish_manifest(
     root["total_elements"] = total_elements
     root["property_name"] = property_name
     root["bucket_size"] = bucket_size
+    root["bucket_method"] = bucket_method
+    root["method_description"] = method_description
+    root["num_buckets"] = len(bucket_records)
+    root["data_min"] = data_min
+    root["data_max"] = data_max
 
     publish_to_target_project(
         client=client,
@@ -303,8 +400,8 @@ def publish_manifest(
         root_object=root,
         version_message=(
             f"Manifest: {total_elements} elements, "
-            f"{len(bucket_records)} buckets, "
-            f"{len(empty_ranges)} empty ranges"
+            f"{len(bucket_records)} buckets ({bucket_method}), "
+            f"size={bucket_size:.2f}, range=[{data_min:.1f}, {data_max:.1f}]"
         ),
     )
 
@@ -316,41 +413,49 @@ def publish_visualization(
     elements_with_values: list[tuple[Base, float]],
     bucket_size: float,
     source_metadata: dict,
+    bucket_method: str,
 ) -> None:
-    """Publish a combined visualization model with gradient-normalized values."""
+    """Publish a combined visualization model with per-bucket gradient values.
+
+    Each element gets a discrete gradient value based on which bucket it falls
+    into, producing visible color bands that match the bucket boundaries.
+    """
     if not elements_with_values:
         return
 
     viz_model_name = f"{parent_name}/_visualization"
     model = get_or_create_model(client, project_id, viz_model_name)
 
-    # Compute global min/max for normalization
+    # Compute global min/max
     values = [v for _, v in elements_with_values]
     global_min = min(values)
     global_max = max(values)
-    value_range = global_max - global_min
 
-    # Build annotated elements
+    # Determine the bucket index range for gradient normalization
+    min_bucket_idx = int(math.floor(global_min / bucket_size))
+    max_bucket_idx = int(math.floor(global_max / bucket_size))
+    bucket_span = max_bucket_idx - min_bucket_idx
+
+    # Build annotated elements with per-bucket discrete gradient
     annotated_elements = []
     for element, value in elements_with_values:
-        # Compute normalized gradient (0.0 to 1.0)
-        if value_range > 0:
-            gradient_value = (value - global_min) / value_range
-        else:
-            gradient_value = 0.5  # All values identical
-
-        # Compute bucket label for this element
         bucket_index = int(math.floor(value / bucket_size))
         range_low = bucket_index * bucket_size
         range_high = range_low + bucket_size
         bucket_label = f"{range_low:.0f}-{range_high:.0f}"
 
-        # Create a wrapper Base with the annotations
+        # Discrete gradient: all elements in the same bucket get the same value
+        if bucket_span > 0:
+            gradient_value = (bucket_index - min_bucket_idx) / bucket_span
+        else:
+            gradient_value = 0.5  # All in one bucket
+
         wrapper = Base()
         wrapper["@element"] = element
         wrapper["gradient_value"] = gradient_value
         wrapper["property_value"] = value
         wrapper["bucket_label"] = bucket_label
+        wrapper["bucket_index"] = bucket_index
         annotated_elements.append(wrapper)
 
     root = Base()
@@ -358,6 +463,9 @@ def publish_visualization(
     root["total_elements"] = len(annotated_elements)
     root["global_min"] = global_min
     root["global_max"] = global_max
+    root["bucket_size"] = bucket_size
+    root["bucket_method"] = bucket_method
+    root["num_buckets"] = bucket_span + 1
     root["source_version_id"] = source_metadata["source_version_id"]
     root["source_model_id"] = source_metadata["source_model_id"]
     root["run_timestamp"] = source_metadata["run_timestamp"]
@@ -369,6 +477,7 @@ def publish_visualization(
         root_object=root,
         version_message=(
             f"Visualization: {len(annotated_elements)} elements, "
+            f"{bucket_span + 1} color bands ({bucket_method}), "
             f"range [{global_min:.1f}, {global_max:.1f}]"
         ),
     )
@@ -467,9 +576,16 @@ def automate_function(
         automate_context.mark_run_failed(debug_msg)
         return
 
+    # Compute bucket size from the chosen method
+    all_values = [v for _, v in elements_with_values]
+    bucket_size, expected_k, method_desc = compute_bucket_size(
+        all_values,
+        function_inputs.bucket_method,
+        function_inputs.num_buckets,
+    )
+
     # Bucket the elements
-    buckets = bucket_elements(elements_with_values, function_inputs.bucket_size)
-    bucket_size = function_inputs.bucket_size
+    buckets = bucket_elements(elements_with_values, bucket_size)
 
     # Compute empty ranges between min and max populated bucket (A1)
     populated_indices = sorted(buckets.keys())
@@ -551,6 +667,10 @@ def automate_function(
         total_elements=count,
         property_name=function_inputs.property_name,
         bucket_size=bucket_size,
+        bucket_method=function_inputs.bucket_method.value,
+        method_description=method_desc,
+        data_min=min(all_values),
+        data_max=max(all_values),
     )
 
     # Publish visualization model (C2+C3)
@@ -561,12 +681,15 @@ def automate_function(
         elements_with_values=elements_with_values,
         bucket_size=bucket_size,
         source_metadata=source_metadata,
+        bucket_method=function_inputs.bucket_method.value,
     )
 
     automate_context.mark_run_success(
         f"Published {count} elements across {created} buckets "
-        f"(plus manifest and visualization) "
-        f"to project {target_project_id}."
+        f"(bucket size={bucket_size:.2f}, method={function_inputs.bucket_method.value}). "
+        f"{method_desc}. "
+        f"Data range: [{min(all_values):.1f}, {max(all_values):.1f}]. "
+        f"Includes manifest and visualization with discrete color bands."
     )
 
 
