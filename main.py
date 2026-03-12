@@ -52,11 +52,21 @@ class FunctionInputs(AutomateBase):
         default=BucketMethod.SCOTT,
         title="Bucket Method",
         description=(
-            "How to determine the number of buckets. "
-            "Scott (recommended): adapts to data spread, best for mixed-scale properties. "
-            "Square Root: simple default, n = sqrt(count). "
-            "Sturges: conservative, fewer buckets, good for <200 elements. "
-            "Manual: you choose the number of buckets."
+            "How to determine the number of buckets:\n"
+            "\n"
+            "• scott (recommended) — Adapts to how spread out your data is. "
+            "Uses standard deviation so clustered data gets fewer buckets "
+            "and scattered data gets more. Best when comparing different properties.\n"
+            "\n"
+            "• square_root — Simple and fast. Number of buckets = √(element count). "
+            "Good all-rounder, works well with large datasets (200+ elements).\n"
+            "\n"
+            "• sturges — Conservative, produces fewer buckets. "
+            "Best for smaller datasets under ~200 elements "
+            "where too many buckets would leave most of them empty.\n"
+            "\n"
+            "• manual — You choose exactly how many buckets "
+            "using the 'Number of Buckets' field below."
         ),
     )
     num_buckets: int = Field(
